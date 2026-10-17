@@ -52,11 +52,6 @@ ok()    { printf '  %s✔%s %s\n' "$GREEN" "$RESET" "$1"; }
 warn()  { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 fail()  { printf '  %s✘%s %s\n' "$RED" "$RESET" "$1"; }
 note()  { printf '    %s%s%s\n' "$GREY" "$1" "$RESET"; }
-# Path in one column, what it holds in the next.
-note_path() {
-  local width=$((${#HOME} + 22))
-  printf '    %s%-*s  %s%s\n' "$GREY" "$width" "$1" "$2" "$RESET"
-}
 blank() { printf '\n'; }
 
 die() { blank; fail "$1"; blank; exit 1; }
@@ -180,7 +175,7 @@ ADDON_DEFAULT+=("1")
 ADDON_ID+=("gradle_mcp")
 ADDON_NAME+=("gradle-mcp")
 ADDON_KIND+=("mcp")
-ADDON_DESC+=("Build and test loop for the agent: run Gradle tasks with captured output, inspect the project, browse dependency sources, and evaluate Kotlin against your real classpath. Needs JBang and JDK 21+.")
+ADDON_DESC+=("Build and test loop for the agent: run Gradle tasks with captured output, inspect the project, browse dependency sources, and evaluate Kotlin against your real classpath. Needs JBang, JDK 21+, and Gradle itself (or a project wrapper).")
 ADDON_DEFAULT+=("1")
 
 ADDON_ID+=("arch_lens")
@@ -411,16 +406,17 @@ safe_rm() {
 }
 
 # Drop a block this script appended to ~/.zshrc: a comment line plus the
-# export directly beneath it. Leaves anything the user wrote alone.
+# export line(s) directly beneath it. Leaves anything the user wrote alone.
+# The second argument is how many lines to drop, including the header line.
 remove_zshrc_block() {
-  local header="$1" file="$HOME/.zshrc" tmp
+  local header="$1" total="${2:-2}" file="$HOME/.zshrc" tmp
   [ -f "$file" ] || return 0
   grep -qxF "$header" "$file" 2>/dev/null || return 0
 
   tmp=$(mktemp) || return 1
-  awk -v h="$header" '
-    skip == 1 { skip = 0; next }
-    $0 == h   { skip = 1; next }
+  awk -v h="$header" -v total="$total" '
+    skip > 0 { skip--; next }
+    $0 == h  { skip = total - 1; next }
     { print }
   ' "$file" >"$tmp" || { rm -f "$tmp"; return 1; }
 
@@ -436,12 +432,11 @@ remove_zshrc_block() {
   return 0
 }
 
-# Everything the add-on installers put outside ~/.config/opencode, which the
-# main uninstall does not reach.
-uninstall_addons() {
-  step "Removing add-on state outside the config directory"
+# The Uninstall menu drives these one family at a time.
 
-  # The Kotlin extension lives in the editor, not under $HOME/.config.
+# Remove the VS Code Kotlin extension, which lives in the editor, not inside
+# the config directory.
+uninstall_kotlin_ext() {
   local cli installed
   if cli=$(editor_cli); then
     installed=$("$cli" --list-extensions 2>/dev/null)
@@ -453,44 +448,16 @@ uninstall_addons() {
       fi
     fi
   fi
+}
 
-  # Globally installed npm add-on packages.
+# The globally installed opencode-mem0 npm package, plus the MEM0 key lines the
+# installer asked you to add to ~/.zshrc.
+uninstall_mem0() {
+  remove_zshrc_block "# opencode mem0"
   if has npm && npm ls -g --depth=0 2>/dev/null | grep -q "opencode-mem0"; then
     run_quiet npm uninstall -g opencode-mem0 \
       && ok "Removed the opencode-mem0 package" \
       || warn "Could not remove opencode-mem0."
-  fi
-
-  # Serena keeps its global config and logs here, outside the project.
-  safe_rm "$HOME/.serena"
-
-  # Lines this script appended to the shell profile.
-  remove_zshrc_block "# opencode"
-  remove_zshrc_block "# opencode superpowers"
-  remove_zshrc_block "# opencode mem0"
-
-  # uv and JBang are general-purpose tools that other projects may rely on, and
-  # you may well have had them before running this script, so they are opt-in.
-  if has uvx || has jbang; then
-    blank
-    info "uv and JBang are what Serena and gradle-mcp run through."
-    note "Other projects may use them, so they are kept by default."
-    if confirm "Uninstall them too?" n; then
-      if has brew; then
-        brew list --formula 2>/dev/null | grep -qx "uv" \
-          && run_quiet brew uninstall --force uv
-        brew list --formula 2>/dev/null | grep -qx "jbang" \
-          && run_quiet brew uninstall --force jbang
-      fi
-      # The standalone uv installer keeps everything under $HOME instead.
-      safe_rm "$HOME/.local/bin/uv"
-      safe_rm "$HOME/.local/bin/uvx"
-      safe_rm "$HOME/.local/share/uv"
-      safe_rm "$HOME/.cache/uv"
-      remove_zshrc_block "# uv"
-      hash -r 2>/dev/null || true
-      ok "Removed the tooling."
-    fi
   fi
 
   # Keys you exported yourself, outside the blocks this script owns.
@@ -499,8 +466,48 @@ uninstall_addons() {
     warn "~/.zshrc still exports MEM0_API_KEY or CONTEXT7_API_KEY."
     note "That line is outside the blocks this script wrote, so it is left alone."
   fi
+}
 
-  return 0
+# java, jbang, and gradle. Clean up Homebrew copies too, in case an older run
+# of this script installed them that way.
+uninstall_tool_sdkman() {
+  if has brew; then
+    brew list --formula 2>/dev/null | grep -qx "jbang" \
+      && run_quiet brew uninstall --force jbang
+    brew list --formula 2>/dev/null | grep -qx "gradle" \
+      && run_quiet brew uninstall --force gradle
+  fi
+  # The sdkman-installed candidates; sdkman itself stays in case other
+  # projects use it to manage their own candidates.
+  safe_rm "$HOME/.sdkman/candidates/java"
+  safe_rm "$HOME/.sdkman/candidates/jbang"
+  safe_rm "$HOME/.sdkman/candidates/gradle"
+  if [ -d "$HOME/.sdkman/candidates" ]; then
+    note "sdkman itself stayed; only its java/jbang/gradle candidates were removed."
+  fi
+}
+
+uninstall_tool_uv() {
+  if has brew; then
+    brew list --formula 2>/dev/null | grep -qx "uv" \
+      && run_quiet brew uninstall --force uv
+  fi
+  # The standalone uv installer keeps everything under $HOME instead.
+  safe_rm "$HOME/.local/bin/uv"
+  safe_rm "$HOME/.local/bin/uvx"
+  safe_rm "$HOME/.local/share/uv"
+  safe_rm "$HOME/.cache/uv"
+  remove_zshrc_block "# uv"
+}
+
+uninstall_tool_bun() {
+  if has brew; then
+    brew list --formula 2>/dev/null | grep -qx "bun" \
+      && run_quiet brew uninstall --force bun
+  fi
+  # The standalone bun installer keeps everything under ~/.bun.
+  safe_rm "$HOME/.bun"
+  remove_zshrc_block "# bun" 3
 }
 
 # Add-ons that write into project directories rather than your home directory.
@@ -517,32 +524,10 @@ report_project_leftovers() {
   note "Remove them per project if you want a clean slate."
 }
 
-uninstall_opencode() {
-  title "Uninstall" "Removes opencode and everything this script installed."
-
-  info "This will remove:"
-  note "the opencode binary (Homebrew, npm, or install-script copy)"
-  note_path "$OPENCODE_CONFIG_DIR"        "config, agents, commands, skills, plugins"
-  note_path "$HOME/.local/share/opencode" "credentials, sessions, MCP auth"
-  note_path "$HOME/.cache/opencode"       "caches"
-  note_path "$HOME/.local/state/opencode" "logs and state"
-  note_path "$HOME/.opencode"             "install-script binary"
-  note_path "$HOME/.config/ponytail"      "ponytail mode and config"
-  note_path "$HOME/.serena"               "Serena global config and logs"
-  blank
-  info "And, asking first for each:"
-  note "the Kotlin by JetBrains extension in VS Code"
-  note "the globally installed opencode-mem0 package"
-  note "the PATH and telemetry lines this script added to ~/.zshrc"
-  note "uv and JBang, if you want them gone as well"
-  blank
-
-  if ! confirm "Remove all of the above?" n; then
-    info "Left everything alone."
-    return 1
-  fi
-  blank
-
+# opencode itself and everything it keeps inside the config directory.
+# Serena's global config and ponytail's mode file ride along; they were both
+# made by the installers this script runs.
+uninstall_opencode_core() {
   # Providers, agents, and commands are easy to lose and annoying to rebuild.
   if [ -d "$OPENCODE_CONFIG_DIR" ]; then
     if confirm "Save a backup of your config first?" y; then
@@ -583,19 +568,59 @@ uninstall_opencode() {
   safe_rm "$HOME/.local/state/opencode"
   safe_rm "$HOME/.opencode"
   safe_rm "$HOME/.config/ponytail"
+  safe_rm "$HOME/.serena"
 
-  blank
-  uninstall_addons
-
+  # Lines this script appended to the shell profile.
+  remove_zshrc_block "# opencode"
+  remove_zshrc_block "# opencode superpowers"
   hash -r 2>/dev/null || true
-  blank
-  if opencode_installed; then
-    warn "'opencode' still resolves to $(command -v opencode)"
-    note "Remove that file by hand; it was installed outside \$HOME."
-  else
-    ok "opencode removed."
-  fi
   return 0
+}
+
+uninstall_opencode() {
+  title "Uninstall" "Pick what to remove."
+
+  local removed_opencode=false
+  while true; do
+    blank
+    # Dependencies are shown per item so you can tell what each install pulls in.
+    menu "What to remove" 7 \
+      "opencode + add-on config|binary, config, agents, skills, MCP servers, sessions — deps: Homebrew, npm, or install script" \
+      "JVM toolchain|java, jbang, gradle · runs gradle-mcp and Serena · dep: sdkman" \
+      "uv / uvx|Serena's launcher · dep: Homebrew or ~/.local/bin" \
+      "Bun|removes a manually-installed bun — the script no longer installs one for mem0" \
+      "opencode-mem0|global npm package + MEM0 key lines in ~/.zshrc · dep: Node 20+" \
+      "Kotlin extension|VS Code language server · dep: the editor CLI" \
+      "Done|stop here, leaving everything else alone"
+
+    blank
+    case "$MENU_CHOICE" in
+      1)
+        uninstall_opencode_core || return 1
+        removed_opencode=true
+        ;;
+      2) uninstall_tool_sdkman ;;
+      3) uninstall_tool_uv ;;
+      4) uninstall_tool_bun ;;
+      5) uninstall_mem0 ;;
+      6) uninstall_kotlin_ext ;;
+      7) break ;;
+    esac
+    hash -r 2>/dev/null || true
+  done
+
+  blank
+  if $removed_opencode; then
+    if opencode_installed; then
+      warn "'opencode' still resolves to $(command -v opencode)"
+      note "Remove that file by hand; it was installed outside \$HOME."
+    else
+      ok "opencode removed."
+    fi
+    return 0
+  fi
+  info "Nothing left to remove here."
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -650,6 +675,42 @@ PY
   fi
 
   return 1
+}
+
+# Remove a value from a top-level array in opencode.json, keeping the rest.
+config_remove_from_array() {
+  local key="$1" value="$2"
+  [ -f "$OPENCODE_CONFIG" ] || return 0
+
+  if has node; then
+    node -e '
+      const fs = require("fs");
+      const [file, key, value] = process.argv.slice(1);
+      const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (!Array.isArray(cfg[key])) process.exit(0);
+      const rest = cfg[key].filter((v) => v !== value);
+      if (rest.length === cfg[key].length) process.exit(0);
+      cfg[key] = rest;
+      fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+    ' "$OPENCODE_CONFIG" "$key" "$value" 2>/dev/null && return 0
+  fi
+
+  if has python3; then
+    python3 - "$OPENCODE_CONFIG" "$key" "$value" <<'PY' 2>/dev/null && return 0
+import json, sys
+file, key, value = sys.argv[1:4]
+with open(file) as f:
+    cfg = json.load(f)
+arr = cfg.get(key)
+if isinstance(arr, list) and value in arr:
+    cfg[key] = [v for v in arr if v != value]
+    with open(file, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+PY
+  fi
+
+  return 0
 }
 
 # opencode v2 nests servers under mcp.servers; v1 puts them directly under mcp.
@@ -825,6 +886,12 @@ add_plugin() {
   return 1
 }
 
+# Unregister an npm plugin, undoing add_plugin.
+remove_plugin() {
+  local pkg="$1"
+  config_remove_from_array "plugin" "$pkg"
+}
+
 # install_skills_from_git <repo-url> <subpath>:<skill-name> ...
 install_skills_from_git() {
   local repo="$1"; shift
@@ -896,18 +963,67 @@ ensure_uv() {
   return 1
 }
 
-# Warn when a JVM tool will not start, without blocking the install.
-check_java() {
-  local want="$1" have
-  if ! has java; then
-    warn "No java on PATH; this add-on needs JDK $want or newer to run."
+# sdkman manages the Java toolchain (java, jbang, gradle). It installs to
+# ~/.sdkman and defines `sdk` as a shell function, so sourcing its init script
+# is the only way to see it in this shell.
+ensure_sdkman() {
+  if [ ! -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+    warn "sdkman is not installed; the Java toolchain installs through it."
+    blank
+    if confirm "Install sdkman with the official installer?" y; then
+      curl -s "https://get.sdkman.io" | bash || {
+        warn "The sdkman installer failed."
+        return 1
+      }
+    else
+      note "Install it from https://sdkman.io and re-run this script."
+      return 1
+    fi
+  fi
+  # shellcheck disable=SC1090
+  . "$HOME/.sdkman/bin/sdkman-init.sh"
+  # Answer the "set as default?" prompt so `sdk install` never blocks.
+  if ! grep -qx 'sdkman_auto_answer=true' "$HOME/.sdkman/etc/config" 2>/dev/null; then
+    printf '\nsdkman_auto_answer=true\n' >>"$HOME/.sdkman/etc/config"
+  fi
+  return 0
+}
+
+# Install a sdkman candidate unless it is already present. For java, a minimum
+# major version triggers an upgrade when the installed one is older.
+sdkman_ensure() {
+  local cand="$1" min="${2:-}" have
+
+  # A candidate installed in a previous run may exist without being on this
+  # shell's PATH yet; point at it before deciding anything.
+  if [ -x "$HOME/.sdkman/candidates/$cand/current/bin/$cand" ]; then
+    export PATH="$HOME/.sdkman/candidates/$cand/current/bin:$PATH"
+    hash -r 2>/dev/null || true
+  fi
+
+  if has "$cand"; then
+    if [ -z "$min" ]; then
+      return 0
+    fi
+    have=$(java -version 2>&1 | head -n 1 | sed -n 's/.*"\([0-9][0-9]*\).*/\1/p')
+    if [ -n "$have" ] && [ "$have" -ge "$min" ] 2>/dev/null; then
+      return 0
+    fi
+    warn "Java $have is older than $min; upgrading via sdkman."
+  fi
+
+  if ! ensure_sdkman; then
     return 1
   fi
-  have=$(java -version 2>&1 | head -n 1 | sed -n 's/.*"\([0-9][0-9]*\).*/\1/p')
-  if [ -n "$have" ] && [ "$have" -lt "$want" ] 2>/dev/null; then
-    warn "Java $have found, but this add-on needs $want or newer."
+
+  warn "Installing $cand with sdkman; this downloads a full distribution."
+  if ! sdk install "$cand"; then
+    warn "sdkman could not install $cand."
     return 1
   fi
+  # sdk install cannot touch the running shell, so export the fresh candidate.
+  export PATH="$HOME/.sdkman/candidates/$cand/current/bin:$PATH"
+  hash -r 2>/dev/null || true
   return 0
 }
 
@@ -1016,7 +1132,7 @@ install_addon_serena() {
   step "Configuring Serena"
 
   ensure_uv || return 1
-  check_java 21 || note "Serena downloads its own JRE if it cannot find one."
+  sdkman_ensure java 21 || note "Serena downloads its own JRE if it cannot find one."
 
   # opencode does not always inherit your shell PATH, so pin the absolute path.
   local uvx_path
@@ -1064,17 +1180,15 @@ install_addon_context7() {
 install_addon_gradle_mcp() {
   step "Configuring gradle-mcp"
 
-  if ! has jbang; then
-    warn "JBang is not installed; gradle-mcp runs through it."
-    if has brew && confirm "Install JBang with Homebrew now?" y; then
-      run brew install jbang || return 1
-      hash -r 2>/dev/null || true
-    else
-      note "Install it from https://www.jbang.dev, then re-run this script."
-      return 1
-    fi
+  if ! sdkman_ensure jbang; then
+    note "Install JBang from https://www.jbang.dev, then re-run this script."
+    return 1
   fi
-  check_java 21 || note "JBang can install a JDK for you: jbang jdk install 21"
+  sdkman_ensure java 21 || note "JBang can install a JDK for you: jbang jdk install 21"
+
+  # gradle-mcp drives builds through Gradle; the wrapper alone covers it when a
+  # project has one, so a failed install only warns.
+  sdkman_ensure gradle || note "Projects with a wrapper do not need it; otherwise install from https://gradle.org/install."
 
   local jbang_path
   jbang_path=$(command -v jbang)
@@ -1180,6 +1294,28 @@ install_addon_handoff() {
   return 0
 }
 
+# Some opencode builds embed a plugin runtime with neither bun:sqlite nor
+# node:sqlite, and a Node ABI that mismatches the prebuilt better-sqlite3. Then
+# opencode-mem0 throws "[opencode-mem0] No SQLite backend available" at boot and
+# opencode will not open. Smoke-test the real binary; never leave that behind.
+mem0_smoke_test() {
+  local log pid rc=0
+
+  has opencode || return 0
+  log=$(mktemp) || return 1
+
+  info "Booting opencode to verify mem0 loads"
+  opencode >"$log" 2>&1 &
+  pid=$!
+  sleep 20
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+
+  grep -qiE "no .qlite backend available|node_module_version" "$log" && rc=1
+  rm -f "$log"
+  return "$rc"
+}
+
 install_addon_mem0() {
   local mem0_key=""
 
@@ -1242,6 +1378,18 @@ install_addon_mem0() {
       fi
       ok "Initialised the local store"
       add_plugin "opencode-mem0" || return 1
+      # The plugin runs inside opencode's embedded runtime, which the npm
+      # install cannot guarantee has a working SQLite driver. Verify that
+      # opencode actually boots with it; otherwise unregister and bail out.
+      if ! mem0_smoke_test; then
+        remove_plugin "opencode-mem0"
+        blank
+        fail "opencode could not boot with opencode-mem0: its SQLite backend is unavailable in this opencode build."
+        warn "Removed 'opencode-mem0' from $OPENCODE_CONFIG so opencode still opens."
+        note "Upgrade opencode, or pick the mem0 hosted backend instead."
+        return 1
+      fi
+      ok "opencode boots cleanly with mem0 loaded"
       ;;
   esac
   return 0
