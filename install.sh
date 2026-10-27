@@ -163,7 +163,7 @@ ADDON_DEFAULT+=("1")
 ADDON_ID+=("serena")
 ADDON_NAME+=("Serena")
 ADDON_KIND+=("mcp")
-ADDON_DESC+=("Symbol-level code navigation and editing over JetBrains' Kotlin LSP. Lets the agent find and edit by symbol instead of reading whole files. Needs uv and JDK 21+.")
+ADDON_DESC+=("Symbol-level code navigation and editing over JetBrains' Kotlin LSP. Installs uv, Python 3.13, and Serena; Kotlin LS supplies its own Java runtime.")
 ADDON_DEFAULT+=("1")
 
 ADDON_ID+=("context7")
@@ -199,7 +199,7 @@ ADDON_DEFAULT+=("1")
 ADDON_ID+=("handoff")
 ADDON_NAME+=("handoff")
 ADDON_KIND+=("skill")
-ADDON_DESC+=("Compacts a session into a structured handoff document so you can start fresh without losing the thread. Installs per project, not globally, and its installer is interactive.")
+ADDON_DESC+=("Compacts a session into a handoff document. Installs Node 22.20+ and Git when needed. Project-scoped and interactive.")
 ADDON_DEFAULT+=("1")
 
 ADDON_ID+=("mem0")
@@ -234,6 +234,8 @@ ADDON_DESC+=("Prunes superseded tool output from the conversation as a session g
 ADDON_DEFAULT+=("1")
 
 ADDON_SELECTED=()
+ADDON_STATUS=()
+ADDON_FAILURES=0
 
 # Multi-select list. Fills ADDON_SELECTED with 0/1.
 select_addons() {
@@ -343,9 +345,114 @@ ensure_path() {
 
 require_brew() {
   has brew && return 0
-  fail "Homebrew is not installed."
-  info "Install it from https://brew.sh, or pick another source."
-  return 1
+  local bin prefix
+  if ! has brew; then
+    for bin in /opt/homebrew/bin /usr/local/bin; do
+      [ -x "$bin/brew" ] && export PATH="$bin:$PATH"
+    done
+  fi
+  if ! has brew; then
+    [ "$(uname -s)" = Darwin ] || { fail "Automatic dependency installation requires macOS and Homebrew."; return 1; }
+    step "Installing Homebrew for the selected tool's dependencies"
+    local installer
+    installer=$(mktemp) || return 1
+    if ! curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh >"$installer"; then
+      rm -f "$installer"
+      return 1
+    fi
+    bash "$installer"
+    local rc=$?
+    rm -f "$installer"
+    [ "$rc" -eq 0 ] || return 1
+    for bin in /opt/homebrew/bin /usr/local/bin; do
+      [ -x "$bin/brew" ] && export PATH="$bin:$PATH"
+    done
+  fi
+  has brew || { fail "Homebrew installation did not provide brew."; return 1; }
+  # Homebrew's installer does not activate its PATH in the calling shell.
+  prefix=$(brew --prefix) || return 1
+  persist_path "$prefix/bin" "# opencode homebrew"
+}
+
+persist_path() {
+  local bin="$1" header="$2" profile="${3:-$HOME/.zshrc}"
+  export PATH="$bin:$PATH"
+  hash -r 2>/dev/null || true
+  if ! grep -qxF "$header" "$profile" 2>/dev/null; then
+    printf '\n%s\nexport PATH=%q:"$PATH"\n' "$header" "$bin" >>"$profile" || return 1
+    note "Added $bin to ~/.zshrc for future sessions."
+  fi
+}
+
+version_at_least() {
+  awk -v actual="${1#v}" -v minimum="$2" 'BEGIN {
+    split(actual, a, "."); split(minimum, m, ".");
+    for (i = 1; i <= 3; i++) {
+      if (a[i]+0 > m[i]+0) exit 0;
+      if (a[i]+0 < m[i]+0) exit 1;
+    }
+    exit 0;
+  }'
+}
+
+ensure_command() {
+  local command="$1" formula="${2:-$1}"
+  has "$command" && return 0
+  require_brew || return 1
+  step "Installing dependency: $formula"
+  run brew install "$formula" || return 1
+  hash -r 2>/dev/null || true
+  has "$command" || { fail "$command is still unavailable."; return 1; }
+}
+
+ensure_git() {
+  git --version >/dev/null 2>&1 && return 0
+  require_brew || return 1
+  run brew install git || return 1
+  export PATH="$(brew --prefix git)/bin:$PATH"
+  hash -r 2>/dev/null || true
+  git --version >/dev/null 2>&1
+}
+
+ensure_node() {
+  local minimum="${1:-18.0.0}" version="" prefix
+  version=$(node --version 2>/dev/null) || version=""
+  if [ -n "$version" ] && version_at_least "$version" "$minimum" \
+      && npm --version >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then
+    return 0
+  fi
+  require_brew || return 1
+  step "Installing Node.js 24 LTS, npm, and npx (need Node >= $minimum)"
+  if brew list --versions node@24 >/dev/null 2>&1; then
+    run brew upgrade node@24 || return 1
+  else
+    run brew install node@24 || return 1
+  fi
+  prefix=$(brew --prefix node@24) || return 1
+  persist_path "$prefix/bin" "# opencode node" || return 1
+  version=$(node --version) || return 1
+  version_at_least "$version" "$minimum" && npm --version >/dev/null 2>&1 \
+    && npx --version >/dev/null 2>&1 || { fail "Node.js >= $minimum, npm, and npx are required."; return 1; }
+}
+
+ensure_json_runtime() {
+  node -e 'JSON.parse("{}")' >/dev/null 2>&1 && return 0
+  python3 -c 'import json' >/dev/null 2>&1 && return 0
+  ensure_node
+}
+
+plugin_array_key() {
+  if mcp_nests_under_servers; then printf 'plugins'; else printf 'plugin'; fi
+}
+
+ensure_opencode_version() {
+  local minimum="$1" version
+  version=$(opencode_version)
+  version_at_least "$version" "$minimum" && return 0
+  step "Updating OpenCode (this add-on needs >= $minimum)"
+  run opencode upgrade "$minimum" || return 1
+  version=$(opencode_version)
+  version_at_least "$version" "$minimum" || { fail "OpenCode >= $minimum is required."; return 1; }
 }
 
 install_opencode() {
@@ -374,7 +481,7 @@ install_opencode() {
       curl -fsSL https://opencode.ai/install | bash || return 1
       ;;
     4)
-      has npm || { fail "npm is not installed."; return 1; }
+      ensure_node || return 1
       step "Installing opencode-ai globally with npm"
       run npm install -g opencode-ai || return 1
       ;;
@@ -587,9 +694,9 @@ uninstall_opencode() {
     menu "What to remove" 7 \
       "opencode + add-on config|binary, config, agents, skills, MCP servers, sessions — deps: Homebrew, npm, or install script" \
       "JVM toolchain|java, jbang, gradle · runs gradle-mcp and Serena · dep: sdkman" \
-      "uv / uvx|Serena's launcher · dep: Homebrew or ~/.local/bin" \
+      "uv / uvx|Serena's package/Python manager · dep: Homebrew or ~/.local/bin" \
       "Bun|removes a manually-installed bun — the script no longer installs one for mem0" \
-      "opencode-mem0|global npm package + MEM0 key lines in ~/.zshrc · dep: Node 20+" \
+      "opencode-mem0|global npm package + MEM0 key lines in ~/.zshrc · dep: Node 22.13+" \
       "Kotlin extension|VS Code language server · dep: the editor CLI" \
       "Done|stop here, leaving everything else alone"
 
@@ -635,6 +742,7 @@ config_has() {
 # needed. Uses node or python3 for the merge so existing settings survive.
 config_add_to_array() {
   local key="$1" value="$2"
+  ensure_json_runtime || return 1
 
   mkdir -p "$OPENCODE_CONFIG_DIR"
 
@@ -653,6 +761,11 @@ EOF
       const fs = require("fs");
       const [file, key, value] = process.argv.slice(1);
       const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (key === "plugin" || key === "plugins") {
+        const legacy = key === "plugin" ? "plugins" : "plugin";
+        cfg[key] = [...new Set([...(cfg[legacy] || []), ...(cfg[key] || [])])];
+        delete cfg[legacy];
+      }
       cfg[key] = cfg[key] || [];
       if (!cfg[key].includes(value)) cfg[key].push(value);
       fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
@@ -665,6 +778,13 @@ import json, sys
 file, key, value = sys.argv[1:4]
 with open(file) as f:
     cfg = json.load(f)
+if key in ('plugin', 'plugins'):
+    legacy = 'plugins' if key == 'plugin' else 'plugin'
+    values = cfg.pop(legacy, []) + cfg.get(key, [])
+    cfg[key] = []
+    for item in values:
+        if item not in cfg[key]:
+            cfg[key].append(item)
 cfg.setdefault(key, [])
 if value not in cfg[key]:
     cfg[key].append(value)
@@ -681,6 +801,7 @@ PY
 config_remove_from_array() {
   local key="$1" value="$2"
   [ -f "$OPENCODE_CONFIG" ] || return 0
+  ensure_json_runtime || return 1
 
   if has node; then
     node -e '
@@ -710,7 +831,7 @@ if isinstance(arr, list) and value in arr:
 PY
   fi
 
-  return 0
+  return 1
 }
 
 # opencode v2 nests servers under mcp.servers; v1 puts them directly under mcp.
@@ -726,6 +847,7 @@ mcp_nests_under_servers() {
 # config_add_mcp <name> <json-object>
 config_add_mcp() {
   local name="$1" blob="$2" nested=0
+  ensure_json_runtime || return 1
   mcp_nests_under_servers && nested=1
 
   mkdir -p "$OPENCODE_CONFIG_DIR"
@@ -741,7 +863,12 @@ config_add_mcp() {
       cfg.mcp = cfg.mcp || {};
       let target = cfg.mcp;
       if (nested === "1") target = cfg.mcp.servers = cfg.mcp.servers || {};
-      target[name] = JSON.parse(blob);
+      const entry = JSON.parse(blob);
+      if (nested === "1" && entry.enabled !== undefined) {
+        entry.disabled = !entry.enabled;
+        delete entry.enabled;
+      }
+      target[name] = entry;
       fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
     ' "$OPENCODE_CONFIG" "$name" "$blob" "$nested" 2>/dev/null && return 0
   fi
@@ -754,7 +881,10 @@ with open(file) as f:
     cfg = json.load(f)
 mcp = cfg.setdefault("mcp", {})
 target = mcp.setdefault("servers", {}) if nested == "1" else mcp
-target[name] = json.loads(blob)
+entry = json.loads(blob)
+if nested == "1" and "enabled" in entry:
+    entry["disabled"] = not entry.pop("enabled")
+target[name] = entry
 with open(file, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
@@ -768,6 +898,7 @@ PY
 config_move_to_array_end() {
   local key="$1" value="$2"
   [ -f "$OPENCODE_CONFIG" ] || return 0
+  ensure_json_runtime || return 1
 
   if has node; then
     node -e '
@@ -797,7 +928,7 @@ if isinstance(arr, list) and value in arr:
 PY
   fi
 
-  return 0
+  return 1
 }
 
 # Fold a stray opencode.jsonc back into opencode.json.
@@ -810,17 +941,24 @@ consolidate_config() {
   local jsonc="$OPENCODE_CONFIG_DIR/opencode.jsonc"
   local tui="$OPENCODE_CONFIG_DIR/tui.json"
   local moved=0
+  local plugin_key
+  plugin_key=$(plugin_array_key)
 
-  has node || return 0
+  [ -f "$jsonc" ] || [ -f "$tui" ] || return 0
+  ensure_node || return 1
 
   if [ -f "$jsonc" ] && [ -f "$OPENCODE_CONFIG" ]; then
     if node -e '
       const fs = require("fs");
-      const [main, extra] = process.argv.slice(1);
+      const [main, extra, pluginKey] = process.argv.slice(1);
       const strip = (s) => s.replace(/^\s*\/\/.*$/gm, "");
       const cfg = JSON.parse(fs.readFileSync(main, "utf8"));
+      cfg[pluginKey] = [...(cfg.plugin || []), ...(cfg.plugins || [])]
+        .filter((v, i, a) => a.indexOf(v) === i);
+      delete cfg[pluginKey === "plugin" ? "plugins" : "plugin"];
       const side = JSON.parse(strip(fs.readFileSync(extra, "utf8")));
-      for (const [key, value] of Object.entries(side)) {
+      for (const [sideKey, value] of Object.entries(side)) {
+        const key = sideKey === "plugin" || sideKey === "plugins" ? pluginKey : sideKey;
         if (key === "$schema") continue;
         if (Array.isArray(value)) {
           const arr = Array.isArray(cfg[key]) ? cfg[key] : [];
@@ -830,29 +968,36 @@ consolidate_config() {
         }
       }
       fs.writeFileSync(main, JSON.stringify(cfg, null, 2) + "\n");
-    ' "$OPENCODE_CONFIG" "$jsonc" 2>/dev/null; then
-      mv "$jsonc" "$jsonc.superseded" 2>/dev/null
+    ' "$OPENCODE_CONFIG" "$jsonc" "$plugin_key" 2>/dev/null; then
+      mv "$jsonc" "$jsonc.superseded" || return 1
       rm -f "$jsonc.bak"
       moved=1
+    else
+      fail "Could not consolidate $jsonc; no configuration was removed."
+      return 1
     fi
   fi
 
   # tui.json is for TUI settings only; a "plugin" key there is never read.
-  if [ -f "$tui" ] && grep -q '"plugin"' "$tui" 2>/dev/null; then
+  if [ -f "$tui" ] && grep -qE '"plugins?"' "$tui" 2>/dev/null; then
     if node -e '
       const fs = require("fs");
-      const [main, tui] = process.argv.slice(1);
+      const [main, tui, pluginKey] = process.argv.slice(1);
       const t = JSON.parse(fs.readFileSync(tui, "utf8"));
-      if (!Array.isArray(t.plugin)) process.exit(0);
-      const cfg = JSON.parse(fs.readFileSync(main, "utf8"));
-      const arr = Array.isArray(cfg.plugin) ? cfg.plugin : [];
-      cfg.plugin = [...arr, ...t.plugin].filter((v, i, a) => a.indexOf(v) === i);
-      delete t.plugin;
+      const plugins = [...(t.plugin || []), ...(t.plugins || [])];
+      const cfg = fs.existsSync(main) ? JSON.parse(fs.readFileSync(main, "utf8")) : {};
+      const arr = [...(cfg.plugin || []), ...(cfg.plugins || [])];
+      delete cfg.plugin; delete cfg.plugins;
+      cfg[pluginKey] = [...arr, ...plugins].filter((v, i, a) => a.indexOf(v) === i);
+      delete t.plugin; delete t.plugins;
       fs.writeFileSync(main, JSON.stringify(cfg, null, 2) + "\n");
       if (Object.keys(t).length === 0) fs.unlinkSync(tui);
       else fs.writeFileSync(tui, JSON.stringify(t, null, 2) + "\n");
-    ' "$OPENCODE_CONFIG" "$tui" 2>/dev/null; then
+    ' "$OPENCODE_CONFIG" "$tui" "$plugin_key" 2>/dev/null; then
       moved=1
+    else
+      fail "Could not consolidate plugin entries from $tui."
+      return 1
     fi
   fi
 
@@ -870,26 +1015,23 @@ SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
 add_plugin() {
   local pkg="$1"
 
-  if config_has "$pkg"; then
-    ok "Already present in $OPENCODE_CONFIG"
-    return 0
-  fi
   # Deliberately not using 'opencode plugin --global': it writes to
   # opencode.jsonc, and when both files define "plugin" the .jsonc array
   # shadows the .json one instead of merging. Keep all state in one file.
-  if config_add_to_array "plugin" "$pkg"; then
+  if config_add_to_array "$(plugin_array_key)" "$pkg"; then
     ok "Added to $OPENCODE_CONFIG"
     return 0
   fi
   fail "Could not update $OPENCODE_CONFIG automatically."
-  note "Add this by hand:  { \"plugin\": [\"$pkg\"] }"
+  note "Add this by hand:  { \"$(plugin_array_key)\": [\"$pkg\"] }"
   return 1
 }
 
 # Unregister an npm plugin, undoing add_plugin.
 remove_plugin() {
   local pkg="$1"
-  config_remove_from_array "plugin" "$pkg"
+  config_remove_from_array "plugin" "$pkg" || return 1
+  config_remove_from_array "plugins" "$pkg"
 }
 
 # install_skills_from_git <repo-url> <subpath>:<skill-name> ...
@@ -897,7 +1039,7 @@ install_skills_from_git() {
   local repo="$1"; shift
   local tmp pair src dest rc=0
 
-  has git || { fail "git is required to install skills."; return 1; }
+  ensure_git || return 1
   tmp=$(mktemp -d) || return 1
 
   if ! run_quiet git clone --depth 1 "$repo" "$tmp/repo"; then
@@ -924,107 +1066,107 @@ install_skills_from_git() {
   return "$rc"
 }
 
-# Serena runs through uvx, which ships as part of uv.
+# uv manages Serena's Python interpreter and isolated tool environment.
 ensure_uv() {
-  has uvx && return 0
-
-  warn "uv is not installed; Serena runs through its uvx launcher."
-  blank
-
-  if has brew && confirm "Install uv with Homebrew?" y; then
-    run brew install uv || warn "Homebrew could not install uv."
-    hash -r 2>/dev/null || true
-  fi
-
-  if ! has uvx && confirm "Install uv with the official standalone installer?" y; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh || warn "The uv installer failed."
-    # It drops binaries in ~/.local/bin without touching the current shell.
-    if [ -d "$HOME/.local/bin" ]; then
-      export PATH="$HOME/.local/bin:$PATH"
-      hash -r 2>/dev/null || true
-      if has uvx && ! grep -qxF '# uv' "$HOME/.zshrc" 2>/dev/null; then
-        blank
-        if confirm "Add ~/.local/bin to your PATH in ~/.zshrc?" y; then
-          printf '\n# uv\nexport PATH="$HOME/.local/bin:$PATH"\n' >>"$HOME/.zshrc"
-          ok "Updated ~/.zshrc"
-        fi
-      fi
-    fi
-  fi
-
+  uv --version >/dev/null 2>&1 && uvx --version >/dev/null 2>&1 && return 0
+  require_brew || return 1
+  run brew install uv || return 1
   hash -r 2>/dev/null || true
-  if has uvx; then
-    ok "uv ready — $(uv --version 2>/dev/null | head -n 1)"
-    return 0
-  fi
-
-  fail "uvx is still not on the PATH."
-  note "Install uv from https://docs.astral.sh/uv/ and re-run this script."
-  return 1
+  uv --version >/dev/null 2>&1 && uvx --version >/dev/null 2>&1
 }
 
 # sdkman manages the Java toolchain (java, jbang, gradle). It installs to
 # ~/.sdkman and defines `sdk` as a shell function, so sourcing its init script
 # is the only way to see it in this shell.
 ensure_sdkman() {
-  if [ ! -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+  local dependency rc
+  for dependency in curl zip unzip; do
+    ensure_command "$dependency" || return 1
+  done
+  export SDKMAN_DIR="${SDKMAN_DIR:-$HOME/.sdkman}"
+  if [ ! -f "$SDKMAN_DIR/bin/sdkman-init.sh" ]; then
     warn "sdkman is not installed; the Java toolchain installs through it."
     blank
-    if confirm "Install sdkman with the official installer?" y; then
-      curl -s "https://get.sdkman.io" | bash || {
-        warn "The sdkman installer failed."
-        return 1
-      }
-    else
-      note "Install it from https://sdkman.io and re-run this script."
+    curl -fsSL "https://get.sdkman.io?ci=true" | bash || {
+      warn "The sdkman installer failed."
       return 1
-    fi
+    }
   fi
   # shellcheck disable=SC1090
-  . "$HOME/.sdkman/bin/sdkman-init.sh"
+  # SDKMAN's shell scripts are not nounset-safe.
+  set +u
+  . "$SDKMAN_DIR/bin/sdkman-init.sh"
+  rc=$?
+  set -u
+  [ "$rc" -eq 0 ] && has sdk || return 1
   # Answer the "set as default?" prompt so `sdk install` never blocks.
-  if ! grep -qx 'sdkman_auto_answer=true' "$HOME/.sdkman/etc/config" 2>/dev/null; then
-    printf '\nsdkman_auto_answer=true\n' >>"$HOME/.sdkman/etc/config"
+  if ! grep -qx 'sdkman_auto_answer=true' "$SDKMAN_DIR/etc/config" 2>/dev/null; then
+    printf '\nsdkman_auto_answer=true\n' >>"$SDKMAN_DIR/etc/config" || return 1
   fi
+  sdkman_auto_answer=true
   return 0
 }
 
 # Install a sdkman candidate unless it is already present. For java, a minimum
 # major version triggers an upgrade when the installed one is older.
 sdkman_ensure() {
-  local cand="$1" min="${2:-}" have
-
-  # A candidate installed in a previous run may exist without being on this
-  # shell's PATH yet; point at it before deciding anything.
-  if [ -x "$HOME/.sdkman/candidates/$cand/current/bin/$cand" ]; then
-    export PATH="$HOME/.sdkman/candidates/$cand/current/bin:$PATH"
+  local cand="$1" min="${2:-}" identifier="" rc
+  local sdk_root="${SDKMAN_DIR:-$HOME/.sdkman}"
+  if [ -x "$sdk_root/candidates/$cand/current/bin/$cand" ]; then
+    export PATH="$sdk_root/candidates/$cand/current/bin:$PATH"
     hash -r 2>/dev/null || true
   fi
+  toolchain_ready "$cand" "$min" && return 0
+  ensure_sdkman || return 1
 
-  if has "$cand"; then
-    if [ -z "$min" ]; then
-      return 0
+  if [ "$cand" = java ]; then
+    # Select the requested LTS, rather than SDKMAN's changing default JDK.
+    set +u
+    identifier=$(sdk list java | awk -F '|' -v minimum="$min" '
+      $6 ~ /-tem/ {
+        id=$6; gsub(/[[:space:]]/, "", id); split(id, version, ".");
+        if (version[1] == minimum) { print id; exit }
+      }')
+    set -u
+    [ -n "$identifier" ] || { fail "SDKMAN did not list a Temurin JDK $min."; return 1; }
+  fi
+  step "Installing dependency: $cand ${identifier}"
+  set +u
+  if [ -n "$identifier" ]; then
+    if [ -x "$SDKMAN_DIR/candidates/$cand/$identifier/bin/java" ]; then
+      sdk use "$cand" "$identifier"
+    else
+      sdk install "$cand" "$identifier" && sdk use "$cand" "$identifier"
     fi
-    have=$(java -version 2>&1 | head -n 1 | sed -n 's/.*"\([0-9][0-9]*\).*/\1/p')
-    if [ -n "$have" ] && [ "$have" -ge "$min" ] 2>/dev/null; then
-      return 0
-    fi
-    warn "Java $have is older than $min; upgrading via sdkman."
+    rc=$?
+  else
+    sdk install "$cand"
+    rc=$?
   fi
-
-  if ! ensure_sdkman; then
-    return 1
-  fi
-
-  warn "Installing $cand with sdkman; this downloads a full distribution."
-  if ! sdk install "$cand"; then
-    warn "sdkman could not install $cand."
-    return 1
-  fi
-  # sdk install cannot touch the running shell, so export the fresh candidate.
-  export PATH="$HOME/.sdkman/candidates/$cand/current/bin:$PATH"
+  set -u
+  [ "$rc" -eq 0 ] || return 1
+  export PATH="$SDKMAN_DIR/candidates/$cand/current/bin:$PATH"
+  # sdk use can choose a candidate without changing its current symlink.
+  [ -n "$identifier" ] && export PATH="$SDKMAN_DIR/candidates/$cand/$identifier/bin:$PATH"
   hash -r 2>/dev/null || true
-  return 0
+  toolchain_ready "$cand" "$min" || { fail "$cand installed but failed its runtime check."; return 1; }
+}
+
+toolchain_ready() {
+  local cand="$1" minimum="$2" version java_home
+  case "$cand" in
+    java)
+      version=$(java -version 2>&1 | sed -n 's/.*version "\([^"]*\)".*/\1/p' | head -n 1)
+      [ -n "$version" ] && version_at_least "$version" "$minimum" || return 1
+      javac -version >/dev/null 2>&1 || return 1
+      java_home=$(java -XshowSettings:properties -version 2>&1 | awk '$1 == "java.home" { sub(/^[^=]*= /, ""); print; exit }')
+      [ -x "$java_home/bin/javac" ] || return 1
+      export JAVA_HOME="$java_home"
+      ;;
+    jbang) jbang version >/dev/null 2>&1 ;;
+    gradle) gradle --version >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
 }
 
 PONYTAIL_PKG="@dietrichgebert/ponytail"
@@ -1034,8 +1176,7 @@ install_addon_ponytail() {
 
   add_plugin "$PONYTAIL_PKG" || return 1
 
-  # Default intensity. full is ponytail's own default, so only write a config
-  # file when the user wants something else.
+  # Write every choice so an older override cannot win over this selection.
   blank
   info "ponytail intensity for new sessions:"
   menu "Level" 2 \
@@ -1053,15 +1194,33 @@ install_addon_ponytail() {
   esac
 
   blank
-  if [ "$mode" = "full" ]; then
-    note "Keeping the built-in default (full); no config file needed."
-  else
-    mkdir -p "$HOME/.config/ponytail"
-    printf '{\n  "defaultMode": "%s"\n}\n' "$mode" >"$HOME/.config/ponytail/config.json"
-    ok "Default level set to $mode in ~/.config/ponytail/config.json"
-  fi
+  ensure_json_runtime || return 1
+  set_ponytail_mode "$mode" "$HOME/.config/ponytail/config.json" || return 1
+  ok "Default level set to $mode in ~/.config/ponytail/config.json"
+  [ -n "${PONYTAIL_DEFAULT_MODE:-}" ] && warn "PONYTAIL_DEFAULT_MODE in your environment overrides this file."
 
   return 0
+}
+
+set_ponytail_mode() {
+  local mode="$1" file="$2"
+  mkdir -p "$(dirname "$file")" || return 1
+  if has node; then
+    node -e '
+      const fs = require("fs");
+      const [file, mode] = process.argv.slice(1);
+      const cfg = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+      cfg.defaultMode = mode;
+      fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+    ' "$file" "$mode" && return 0
+  fi
+  python3 - "$file" "$mode" <<'PY'
+import json, pathlib, sys
+file = pathlib.Path(sys.argv[1])
+cfg = json.loads(file.read_text()) if file.exists() else {}
+cfg['defaultMode'] = sys.argv[2]
+file.write_text(json.dumps(cfg, indent=2) + '\n')
+PY
 }
 
 # The free Apache-2.0 Kotlin server. Its sibling, JetBrains.intellij-server,
@@ -1075,27 +1234,36 @@ editor_cli() {
   for cli in code cursor windsurf codium; do
     has "$cli" && { printf '%s' "$cli"; return 0; }
   done
+  for cli in "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+      "$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"; do
+    [ -x "$cli" ] && { printf '%s' "$cli"; return 0; }
+  done
   return 1
+}
+
+ensure_editor() {
+  editor_cli >/dev/null && return 0
+  require_brew || return 1
+  step "Installing Visual Studio Code for the Kotlin extension"
+  run brew install --cask visual-studio-code || return 1
+  hash -r 2>/dev/null || true
+  editor_cli >/dev/null || { fail "VS Code installed but its CLI could not be found."; return 1; }
 }
 
 install_addon_kotlin_vscode() {
   step "Installing Kotlin by JetBrains"
 
   local cli
-  if ! cli=$(editor_cli); then
-    fail "No VS Code command found on your PATH."
-    note "In VS Code press Cmd+Shift+P and run"
-    note "\"Shell Command: Install 'code' command in PATH\", then re-run this script."
-    return 1
-  fi
+  ensure_editor || return 1
+  cli=$(editor_cli) || return 1
 
   # Installing into the wrong editor is easy to do and confusing to debug.
-  if [ "$cli" != "code" ]; then
+  if [ "$(basename "$cli")" != "code" ]; then
     warn "'code' is not on your PATH, but '$cli' is."
     note "Extensions installed with '$cli' go to that editor, not VS Code."
     if ! confirm "Install into $cli instead?" n; then
       note "In VS Code run Cmd+Shift+P, \"Shell Command: Install 'code' command in PATH\"."
-      return 1
+      return 2
     fi
   fi
 
@@ -1107,9 +1275,11 @@ install_addon_kotlin_vscode() {
     warn "The older $KOTLIN_EXT_OLD extension is installed."
     note "$KOTLIN_EXT cannot activate while it is there."
     if confirm "Remove the old one?" y; then
-      run_quiet "$cli" --uninstall-extension "$KOTLIN_EXT_OLD" \
-        && ok "Removed $KOTLIN_EXT_OLD" \
-        || warn "Could not remove it; do it from the Extensions view."
+      run_quiet "$cli" --uninstall-extension "$KOTLIN_EXT_OLD" || return 1
+      ok "Removed $KOTLIN_EXT_OLD"
+    else
+      note "Skipping the new extension while the conflicting extension remains."
+      return 2
     fi
   fi
 
@@ -1123,6 +1293,12 @@ install_addon_kotlin_vscode() {
     fi
     ok "Installed $KOTLIN_EXT"
   fi
+  installed=$("$cli" --list-extensions) || return 1
+  printf '%s\n' "$installed" | grep -qix "$KOTLIN_EXT" || return 1
+  if printf '%s\n' "$installed" | grep -qix "$KOTLIN_EXT_OLD"; then
+    fail "The conflicting Kotlin extension is still installed."
+    return 1
+  fi
 
   note "Open any .kt file to start it. The first Gradle import takes a few minutes."
   return 0
@@ -1132,17 +1308,18 @@ install_addon_serena() {
   step "Configuring Serena"
 
   ensure_uv || return 1
-  sdkman_ensure java 21 || note "Serena downloads its own JRE if it cannot find one."
-
-  # opencode does not always inherit your shell PATH, so pin the absolute path.
-  local uvx_path
-  uvx_path=$(command -v uvx)
+  # uv supplies a supported Python and all Python packages. Kotlin LS bundles JBR.
+  run uv python install 3.13 || return 1
+  run uv tool install --python 3.13 serena-agent || return 1
+  local serena_path
+  serena_path="$(uv tool dir --bin)/serena"
+  run_quiet "$serena_path" start-mcp-server --help || return 1
 
   # 'ide' is Serena's generic context for coding agents; it drops the tools
   # opencode already provides rather than duplicating them.
   if ! config_add_mcp serena "{
     \"type\": \"local\",
-    \"command\": [\"$uvx_path\", \"--from\", \"git+https://github.com/oraios/serena\", \"serena\", \"start-mcp-server\", \"--context\", \"ide\"],
+    \"command\": [\"$serena_path\", \"start-mcp-server\", \"--context\", \"ide\"],
     \"enabled\": true
   }"; then
     fail "Could not write the serena entry to $OPENCODE_CONFIG."
@@ -1152,7 +1329,7 @@ install_addon_serena() {
 
   blank
   info "One step per project, from the project root:"
-  note "uvx --from git+https://github.com/oraios/serena serena project generate-yml"
+  note "$serena_path project generate-yml"
   note "then set  languages: [\"kotlin\"]  in .serena/project.yml"
   note "Raise the heap there too; the Kotlin server defaults to -Xmx2G."
   return 0
@@ -1180,15 +1357,15 @@ install_addon_context7() {
 install_addon_gradle_mcp() {
   step "Configuring gradle-mcp"
 
-  if ! sdkman_ensure jbang; then
-    note "Install JBang from https://www.jbang.dev, then re-run this script."
-    return 1
-  fi
-  sdkman_ensure java 21 || note "JBang can install a JDK for you: jbang jdk install 21"
+  sdkman_ensure java 21 || return 1
+  local java_home="$JAVA_HOME"
+  sdkman_ensure jbang || return 1
 
-  # gradle-mcp drives builds through Gradle; the wrapper alone covers it when a
-  # project has one, so a failed install only warns.
-  sdkman_ensure gradle || note "Projects with a wrapper do not need it; otherwise install from https://gradle.org/install."
+  if [ ! -x ./gradlew ]; then
+    sdkman_ensure gradle || return 1
+  fi
+  export JAVA_HOME="$java_home"
+  export PATH="$JAVA_HOME/bin:$PATH"
 
   local jbang_path
   jbang_path=$(command -v jbang)
@@ -1196,6 +1373,7 @@ install_addon_gradle_mcp() {
   if ! config_add_mcp gradle "{
     \"type\": \"local\",
     \"command\": [\"$jbang_path\", \"run\", \"--quiet\", \"--fresh\", \"gradle-mcp@rnett\"],
+    \"environment\": {\"JAVA_HOME\": \"$JAVA_HOME\", \"PATH\": \"$PATH\"},
     \"enabled\": true
   }"; then
     fail "Could not write the gradle entry to $OPENCODE_CONFIG."
@@ -1222,17 +1400,13 @@ install_addon_arch_lens() {
 
 install_addon_superpowers() {
   step "Installing Obra Superpowers"
+  ensure_git || return 1
+  if mcp_nests_under_servers; then
+    ensure_opencode_version 2.0.4 || return 1
+  fi
 
   local spec="superpowers@git+https://github.com/obra/superpowers.git"
-  if config_has "obra/superpowers"; then
-    ok "Already present in $OPENCODE_CONFIG"
-  elif config_add_to_array "plugin" "$spec"; then
-    ok "Added to $OPENCODE_CONFIG"
-  else
-    fail "Could not update $OPENCODE_CONFIG automatically."
-    note "Add this by hand:  { \"plugin\": [\"$spec\"] }"
-    return 1
-  fi
+  add_plugin "$spec" || return 1
 
   note "Installs from git on the next start and registers its skills itself."
   blank
@@ -1249,11 +1423,9 @@ install_addon_superpowers() {
 
 install_addon_caveman() {
   step "Installing caveman"
-
-  if ! has npx; then
-    fail "npx not found; caveman ships its own Node installer."
-    return 1
-  fi
+  # The installer's @caveman-ai/cli dependency requires Node 22.13+.
+  ensure_node 22.13.0 || return 1
+  ensure_git || return 1
 
   blank
   info "caveman's installer runs interactively and patches opencode.json itself."
@@ -1271,20 +1443,17 @@ install_addon_caveman() {
 install_addon_handoff() {
   step "Installing handoff"
 
-  if ! has npx; then
-    fail "npx not found; the skills.sh installer needs it."
-    return 1
-  fi
-
   warn "This installs into the current directory, not your global config."
   note "Working directory: $(pwd)"
   blank
   if ! confirm "Install handoff here?" n; then
     note "Re-run this script from your project root, or install it later with:"
     note "npx skills@latest add mattpocock/skills --skill handoff"
-    return 0
+    return 2
   fi
 
+  ensure_node 22.20.0 || return 1
+  ensure_git || return 1
   run npx -y skills@latest add mattpocock/skills --skill handoff || {
     fail "The skills installer did not finish."
     note "Run it by hand: npx skills@latest add mattpocock/skills"
@@ -1294,26 +1463,70 @@ install_addon_handoff() {
   return 0
 }
 
-# Some opencode builds embed a plugin runtime with neither bun:sqlite nor
-# node:sqlite, and a Node ABI that mismatches the prebuilt better-sqlite3. Then
-# opencode-mem0 throws "[opencode-mem0] No SQLite backend available" at boot and
-# opencode will not open. Smoke-test the real binary; never leave that behind.
+# Check the real host's plugin registry, not just the absence of known errors.
+# A separate loopback server avoids stopping or reconfiguring an existing one.
 mem0_smoke_test() {
-  local log pid rc=0
-
-  has opencode || return 0
-  log=$(mktemp) || return 1
-
-  info "Booting opencode to verify mem0 loads"
-  opencode >"$log" 2>&1 &
-  pid=$!
-  sleep 20
-  kill "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
-
-  grep -qiE "no .qlite backend available|node_module_version" "$log" && rc=1
-  rm -f "$log"
-  return "$rc"
+  local major=1
+  mcp_nests_under_servers && major=2
+  info "Checking mem0 registration in a temporary OpenCode server (up to 120s)"
+  node - "$major" "${1:-120000}" <<'JS'
+const { spawn } = require("node:child_process");
+const { randomBytes } = require("node:crypto");
+const major = Number(process.argv[2]);
+const timeout = Number(process.argv[3]);
+const password = randomBytes(24).toString("hex");
+const child = spawn("opencode", ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
+  stdio: ["ignore", "pipe", "pipe"],
+  env: { ...process.env, NO_COLOR: "1", OPENCODE_PASSWORD: password,
+    OPENCODE_SERVER_PASSWORD: password, OPENCODE_SERVER_USERNAME: "opencode" },
+});
+let output = "", ended = false, lastError = "mem0 never registered";
+child.on("error", () => { ended = true; lastError = "could not launch OpenCode"; });
+child.on("exit", (code, signal) => {
+  ended = true;
+  lastError = `OpenCode exited before verification (code ${code}, signal ${signal})`;
+});
+for (const stream of [child.stdout, child.stderr]) {
+  stream.on("data", chunk => { output = (output + chunk.toString()).slice(-262144); });
+}
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+(async () => {
+  let ready = false;
+  const deadline = Date.now() + timeout;
+  try {
+    while (!ended && Date.now() < deadline) {
+      const url = output.match(/server listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+      if (url) {
+        try {
+          const response = await fetch(url + (major >= 2 ? "/api/plugin" : "/experimental/tool/ids"), {
+            headers: { Authorization: "Basic " + Buffer.from("opencode:" + password).toString("base64") },
+            signal: AbortSignal.timeout(Math.max(1, Math.min(2000, deadline - Date.now()))),
+          });
+          if (response.ok) {
+            const registry = await response.json();
+            ready = major >= 2
+              ? registry.data?.some(p => p.id === "opencode-mem0" && p.state?.status === "active")
+              : Array.isArray(registry) && registry.some(id => id === "memory" || id === "mem0");
+            if (ready) break;
+          } else lastError = `plugin check returned HTTP ${response.status}`;
+        } catch { lastError = "OpenCode did not return a valid plugin registry"; }
+      }
+      await delay(100);
+    }
+    if (!ready || ended) throw new Error(lastError);
+  } catch (error) {
+    console.error("mem0 startup verification failed: " + error.message);
+    process.exitCode = 1;
+  } finally {
+    if (!ended) {
+      child.kill("SIGTERM");
+      const kill = setTimeout(() => child.kill("SIGKILL"), 2000);
+      await new Promise(resolve => child.once("exit", resolve));
+      clearTimeout(kill);
+    }
+  }
+})();
+JS
 }
 
 install_addon_mem0() {
@@ -1333,12 +1546,13 @@ install_addon_mem0() {
   blank
   case "$MENU_CHOICE" in
     1)
-      if [ -z "$MEM0_API_KEY" ]; then
+      if [ -z "${MEM0_API_KEY:-}" ]; then
         warn "MEM0_API_KEY is not set, and mem0 hosted hangs at startup without it."
         note "Get a free key at https://app.mem0.ai/dashboard/api-keys"
         blank
         printf 'Paste your MEM0_API_KEY (or press Enter to skip): '
-        { read -r mem0_key </dev/tty; } 2>/dev/null || mem0_key=""
+        { read -rs mem0_key </dev/tty; } 2>/dev/null || mem0_key=""
+        printf '\n'
       else
         mem0_key="$MEM0_API_KEY"
         ok "Using MEM0_API_KEY from the environment."
@@ -1348,13 +1562,13 @@ install_addon_mem0() {
         blank
         warn "Skipping mem0 — nothing was added to your config."
         note "Export MEM0_API_KEY and re-run this installer to enable it."
-        return 0
+        return 2
       fi
 
       export MEM0_API_KEY="$mem0_key"
       if ! grep -q "MEM0_API_KEY" "$HOME/.zshrc" 2>/dev/null; then
         if confirm "Save MEM0_API_KEY to ~/.zshrc?" y; then
-          printf '\n# opencode mem0\nexport MEM0_API_KEY="%s"\n' "$mem0_key" >>"$HOME/.zshrc"
+          printf '\n# opencode mem0\nexport MEM0_API_KEY=%q\n' "$mem0_key" >>"$HOME/.zshrc" || return 1
           ok "Saved to ~/.zshrc"
         else
           warn "Export MEM0_API_KEY yourself, or opencode will hang on startup."
@@ -1363,7 +1577,8 @@ install_addon_mem0() {
       add_plugin "@mem0/opencode-plugin" || return 1
       ;;
     2)
-      has npm || { fail "npm is required for opencode-mem0."; return 1; }
+      # Current ai/better-sqlite3 dependencies need Node 22; 22.13 has stable SQLite.
+      ensure_node 22.13.0 || return 1
       run_quiet npm install -g opencode-mem0 || {
         fail "npm install failed."
         return 1
@@ -1382,14 +1597,16 @@ install_addon_mem0() {
       # install cannot guarantee has a working SQLite driver. Verify that
       # opencode actually boots with it; otherwise unregister and bail out.
       if ! mem0_smoke_test; then
-        remove_plugin "opencode-mem0"
+        remove_plugin "opencode-mem0" || { fail "Could not unregister the failing mem0 plugin."; return 1; }
         blank
-        fail "opencode could not boot with opencode-mem0: its SQLite backend is unavailable in this opencode build."
+        fail "OpenCode's mem0 startup check failed or timed out."
         warn "Removed 'opencode-mem0' from $OPENCODE_CONFIG so opencode still opens."
-        note "Upgrade opencode, or pick the mem0 hosted backend instead."
+        note "Resolve the reported startup error, or pick the hosted backend."
         return 1
       fi
-      ok "opencode boots cleanly with mem0 loaded"
+      ok "OpenCode's mem0 startup check passed"
+      note "First use may download the local embedding model (~547 MB)."
+      note "Auto-capture also needs a memory provider; configure it in opencode-mem0.jsonc."
       ;;
   esac
   return 0
@@ -1404,7 +1621,15 @@ install_addon_damage_control() {
 
 install_addon_warden() {
   step "Installing warden"
-  add_plugin "opencode-warden" || return 1
+  local spec="opencode-warden@1.3.0"
+  if mcp_nests_under_servers; then
+    ensure_opencode_version 2.0.18 || return 1
+    spec="opencode-warden"
+  fi
+  # Warden 2 requires OpenCode 2; keep V1 on its last compatible release.
+  remove_plugin "opencode-warden" || return 1
+  remove_plugin "opencode-warden@1.3.0" || return 1
+  add_plugin "$spec" || return 1
   note "Its LLM risk evaluation adds latency and cost per call; configure"
   note "it in ~/.config/opencode/opencode-warden.json"
   return 0
@@ -1460,6 +1685,7 @@ MD
 
 install_addon_dcp() {
   step "Installing Dynamic Context Pruning"
+  ensure_opencode_version 1.18.29 || return 1
   # @latest keeps it refreshed on every start, which is what its docs advise.
   add_plugin "@tarquinen/opencode-dcp@latest" || return 1
   note "Verify with /dcp once opencode restarts."
@@ -1467,40 +1693,49 @@ install_addon_dcp() {
 }
 
 install_addons() {
-  local count=${#ADDON_ID[@]} i any=0
+  local count=${#ADDON_ID[@]} i any=0 rc
+  ADDON_FAILURES=0
+  ADDON_STATUS=()
 
   # Absorb anything a previous run or an earlier manual setup left behind.
-  consolidate_config
+  consolidate_config || { ADDON_FAILURES=1; return 1; }
 
   for ((i = 0; i < count; i++)); do
     [ "${ADDON_SELECTED[i]}" = "1" ] || continue
     any=1
     blank
-    "install_addon_${ADDON_ID[i]}" || warn "${ADDON_NAME[i]} did not install cleanly."
+    rc=0
+    "install_addon_${ADDON_ID[i]}" || rc=$?
+    case "$rc" in
+      0) ADDON_STATUS[i]=configured ;;
+      2) ADDON_STATUS[i]=skipped ;;
+      *) ADDON_STATUS[i]=failed; ADDON_FAILURES=$((ADDON_FAILURES + 1)) ;;
+    esac
   done
 
   # Third-party installers (caveman, DCP) write their own config files.
-  consolidate_config
+  consolidate_config || ADDON_FAILURES=$((ADDON_FAILURES + 1))
 
   # DCP asks to load last so it does not interfere with OAuth plugins, and
   # anything installed after it would otherwise land further down the array.
   if config_has "@tarquinen/opencode-dcp"; then
-    config_move_to_array_end "plugin" "@tarquinen/opencode-dcp@latest"
+    config_move_to_array_end "$(plugin_array_key)" "@tarquinen/opencode-dcp@latest" \
+      || { warn "Could not move DCP to the end of the plugin list."; ADDON_FAILURES=$((ADDON_FAILURES + 1)); }
   fi
 
   [ "$any" -eq 0 ] && info "No add-ons selected."
-  return 0
+  [ "$ADDON_FAILURES" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
-addon_selected() {
+addon_ready() {
   local i
   for ((i = 0; i < ${#ADDON_ID[@]}; i++)); do
     if [ "${ADDON_ID[i]}" = "$1" ]; then
-      [ "${ADDON_SELECTED[i]:-0}" = "1" ]
+      [ "${ADDON_STATUS[i]:-}" = configured ]
       return
     fi
   done
@@ -1519,8 +1754,14 @@ summary() {
 
   ok "opencode $(opencode_version)"
   for ((i = 0; i < ${#ADDON_ID[@]}; i++)); do
-    [ "${ADDON_SELECTED[i]:-0}" = "1" ] && ok "${ADDON_NAME[i]} (${ADDON_KIND[i]})"
+    [ "${ADDON_SELECTED[i]:-0}" = "1" ] || continue
+    case "${ADDON_STATUS[i]:-failed}" in
+      configured) ok "${ADDON_NAME[i]} (${ADDON_KIND[i]}) — configured" ;;
+      skipped) info "${ADDON_NAME[i]} — skipped" ;;
+      *) fail "${ADDON_NAME[i]} — failed" ;;
+    esac
   done
+  [ "$ADDON_FAILURES" -gt 0 ] && warn "Setup has failures; review the messages above and re-run."
 
   blank
   printf '  %sNext steps%s\n' "$BOLD" "$RESET"
@@ -1528,25 +1769,26 @@ summary() {
   next_step "cd <your project>" "then run opencode"
   next_step "/init" "let it write AGENTS.md for the repo"
 
-  addon_selected ponytail && next_step "/ponytail-help" "the ponytail commands"
-  addon_selected dcp && next_step "/dcp" "confirm context pruning is live"
+  addon_ready ponytail && next_step "/ponytail-help" "the ponytail commands"
+  addon_ready dcp && next_step "/dcp" "confirm context pruning is live"
 
-  if addon_selected serena; then
+  if addon_ready serena; then
     blank
     printf '  %sPer project, before Serena is useful%s\n' "$BOLD" "$RESET"
-    note "uvx --from git+https://github.com/oraios/serena serena project generate-yml"
+    note "$(uv tool dir --bin)/serena project generate-yml"
     note "then set languages: [\"kotlin\"] in .serena/project.yml"
   fi
 
-  if addon_selected mem0 || addon_selected context7; then
+  if addon_ready mem0 || addon_ready context7; then
     blank
     printf '  %sKeys to set%s\n' "$BOLD" "$RESET"
-    addon_selected mem0 && note "MEM0_API_KEY  (only for the hosted backend)"
-    addon_selected context7 && note "CONTEXT7_API_KEY  (optional, raises rate limits)"
+    addon_ready mem0 && note "MEM0_API_KEY  (only for the hosted backend)"
+    addon_ready context7 && note "CONTEXT7_API_KEY  (optional, raises rate limits)"
   fi
 
   blank
   info "MCP servers and plugins load on the next start, so restart opencode."
+  info "Shared dependencies (Homebrew, Node, Git, SDKMAN, and VS Code) remain unless explicitly removed."
   blank
 }
 
@@ -1630,9 +1872,12 @@ main() {
   title "Add-ons" "Plugins, MCP servers, and skills to install alongside opencode."
   select_addons
   blank
-  install_addons
-
+  local addon_rc=0
+  install_addons || addon_rc=$?
   summary
+  return "$addon_rc"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

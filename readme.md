@@ -28,7 +28,9 @@ by Git so running add-on installers here does not add generated files to this se
 - **An API key** for at least one LLM provider (Anthropic, OpenAI, OpenCode Zen, etc.).
 - **Homebrew** if you plan to install that way — <https://brew.sh>.
 
-Optional but recommended: `git`, and Node.js if you want the npm install path.
+The interactive installer installs missing dependencies for the tools you select. This can include
+Homebrew itself, Node.js/npm/npx, Git, VS Code, uv/Python, and the JVM toolchain. Homebrew may ask for
+your administrator password or Apple's Command Line Tools. Downloads require internet access.
 
 ---
 
@@ -588,22 +590,30 @@ directories copied from a git clone, and one is a VS Code extension.
 
 Things worth knowing before you run it:
 
-- **Serena and gradle-mcp bring their own launchers.** Serena runs through `uvx` and gradle-mcp
-  through JBang, and the script installs both if they are missing — uv via Homebrew, or via the
-  official standalone installer when Homebrew is absent, in which case it offers to put
-  `~/.local/bin` on your `PATH`. Both want JDK 21+, so it warns if `java` is older or missing, and it
-  pins absolute launcher paths into the config because OpenCode does not reliably inherit your shell
-  `PATH`.
+- **Dependencies follow the selected tool.** Working installations are reused. Missing Node is
+  installed as Node 24 LTS through Homebrew, with its path activated for this run and future zsh
+  sessions. Handoff requires Node 22.20+; caveman and local mem0 use Node 22.13+ to satisfy their
+  current transitive dependencies, even though their own quick-start requirements are lower.
+- **Serena is installed through uv**, including Python 3.13 and its Python packages. Its managed
+  Kotlin language server supplies its own Java runtime. The MCP entry uses the installed Serena
+  executable's absolute path.
+- **gradle-mcp gets a JDK 21+, JBang, and Gradle through SDKMAN.** A working project `./gradlew`
+  replaces the need for a global Gradle installation. The script checks the dependencies before
+  writing the MCP entry and includes the selected `JAVA_HOME` in that entry.
+- **The Kotlin extension gets an editor if needed.** Existing editor CLIs and standard VS Code app
+  locations are checked first; otherwise VS Code is installed through Homebrew. Keeping the old,
+  conflicting Kotlin extension skips the new extension rather than reporting it as working.
 - **Serena is per project.** The global MCP entry is only half of it; each project needs
   `.serena/project.yml` with `languages: ["kotlin"]`. The final summary repeats the command.
 - **`handoff` installs into the current directory**, not your global config, because the skills.sh
   installer is project-scoped. The script warns and asks before running it, so run it from your
   project root if you want it there.
-- **`mem0` asks which backend you want.** The hosted service needs a free `MEM0_API_KEY`; the local
-  alternative (`opencode-mem0`) keeps everything in SQLite on your machine. Either way the plugin
-  blocks on its store while loading, so an unconfigured mem0 does not degrade — it hangs OpenCode at
-  startup. The installer therefore registers it only after the key is supplied or `opencode-mem0
-  init` succeeds, and skips it otherwise rather than leaving you with a config that will not boot.
+- **`mem0` asks which backend you want.** Hosted mem0 needs `MEM0_API_KEY`, and an empty answer skips
+  it. Local mem0 gets Node/npm and runs `opencode-mem0 init` before registration. A temporary,
+  authenticated loopback OpenCode server must then report the memory tool (V1) or an active mem0
+  plugin (V2), within 120 seconds. Crashes, missing registration, and timeouts fail the check and
+  remove that plugin entry. This checks registration, not an end-to-end memory query. First use
+  can download a ~547 MB embedding model; automatic capture needs a configured memory provider.
 - **DCP is installed last on purpose.** Its docs ask for it at the end of the `plugin` array so it
   does not interfere with OAuth plugins, so the script moves it there after everything else.
 - **caveman installs from git `main`**, so you always get the current plugin. Its per-turn
@@ -611,6 +621,42 @@ Things worth knowing before you run it:
   by design; the two projects are meant to run together.
 
 MCP servers and plugins load at startup, so restart OpenCode after the script finishes.
+
+The final summary distinguishes **configured**, **skipped**, and **failed** selections. Any failed
+setup returns a nonzero exit status. Plugin packages and their libraries are downloaded by OpenCode;
+their development dependencies do not require separate system installs.
+
+Dependency checks are based on these upstream installation instructions and package manifests:
+
+| Tool | Prerequisites handled by this installer |
+| --- | --- |
+| [OpenCode](https://opencode.ai/docs/) | Homebrew for brew sources; Node/npm for the npm source |
+| [Ponytail](https://github.com/DietrichGebert/ponytail/blob/main/INSTALL.md) | OpenCode's plugin runtime; JSON edits use Node or Python |
+| [Kotlin](https://kotlinlang.org/docs/kotlin-lsp.html) | A VS Code-compatible editor; the extension manages its language server |
+| [Serena](https://github.com/oraios/serena/blob/main/docs/02-usage/010_installation.md) | uv, managed Python 3.13, and the Serena package |
+| [Context7](https://github.com/upstash/context7) | Remote MCP connection; API key optional |
+| [gradle-mcp](https://github.com/rnett/gradle-mcp#getting-started) | JDK 21+, JBang, Gradle or an executable project wrapper; SDKMAN's curl/zip/unzip |
+| [Architecture lens](https://github.com/zachcr-ws/improve-code-architecture#install) | Git for copying the two skills from upstream |
+| [Superpowers](https://github.com/obra/superpowers/blob/main/.opencode/INSTALL.md) | Git; OpenCode V2 requires 2.0.4+ |
+| [Caveman](https://github.com/JuliusBrussee/caveman/blob/main/package.json) | Node 22.13+ for its `@caveman-ai/cli` dependency, npm/npx, Git |
+| [Handoff / skills](https://github.com/vercel-labs/skills/blob/main/package.json) | Node 22.20+, npm/npx, Git |
+| [Hosted mem0](https://github.com/mem0ai/mem0/tree/main/integrations/opencode-plugin) | OpenCode's plugin runtime and a user-supplied API key |
+| [Local mem0](https://github.com/ZeR020/opencode-mem0#quick-start) | Node 22.13+ for current AI/SQLite dependencies, npm/npx; native packages managed by npm/OpenCode |
+| [Damage-control](https://github.com/whjvenyl/opencode-damage-control#quick-start) | OpenCode's plugin runtime |
+| [Warden](https://github.com/toreuyar/opencode-warden/blob/main/package.json) | V1 uses Warden 1.3.0; V2 uses Warden 2 and requires OpenCode 2.0.18+ |
+| KTX conventions | No extra runtime; writes Markdown |
+| [DCP](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning) | OpenCode 1.18.29+; bundled packages managed by OpenCode |
+
+The script upgrades OpenCode when a selected add-on requires a newer host. It chooses `plugin`
+for V1 and `plugins` for V2. Shared dependencies are retained by default during uninstall; the JVM,
+uv, Bun, mem0, and extension removal options remain explicit.
+
+Node checks also account for the published [`@caveman-ai/cli`](https://registry.npmjs.org/@caveman-ai/cli/latest),
+[`ai` 7](https://registry.npmjs.org/ai/7.0.4), and
+[`better-sqlite3` 13](https://registry.npmjs.org/better-sqlite3/13.0.2) runtime requirements.
+
+Run the isolated regression checks with `python3 -m unittest discover -s tests -v` and the syntax
+check with `bash -n install.sh`. The tests use fake installers and local HTTP servers.
 
 ### Ponytail
 
@@ -842,8 +888,8 @@ Four things it asks about individually, because removing them might not be what 
 Two categories are deliberately left alone. Project directories are never touched, so `.serena/`,
 `.agents/skills/`, `.opencode/`, and any KTX block appended to an `AGENTS.md` survive — the script
 prints a reminder listing them rather than hunting through your repositories. And `MEM0_API_KEY` and
-`CONTEXT7_API_KEY` are only ever *suggested* by the installer, never written, so it warns that they
-are still in your profile instead of editing lines it does not own.
+`CONTEXT7_API_KEY` lines written outside installer-owned blocks are left alone. Hosted mem0 can
+save its key in an installer-owned `.zshrc` block; the mem0 uninstall option removes that block.
 
 ---
 
