@@ -13,6 +13,10 @@ plugins, skills, and a VS Code extension — installing each one the way its own
 
 See [Add-ons](#7-add-ons) for what the list contains.
 
+`install.sh` is self-contained: it downloads add-ons as needed and does not require bundled
+skills or configuration. Local `.opencode/`, `.agents/`, and `skills-lock.json` files are ignored
+by Git so running add-on installers here does not add generated files to this setup repository.
+
 ---
 
 ## 1. Prerequisites
