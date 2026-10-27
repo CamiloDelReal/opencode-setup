@@ -3,13 +3,28 @@
 OpenCode is an open source AI coding agent that runs in your terminal. This guide walks through
 installing it on macOS, connecting a model provider, and configuring it for daily use.
 
-To do the install interactively instead, run [`install.sh`](install.sh) from this repo. It detects an
+For the interactive setup, run [`install.sh`](install.sh) from this repo. It detects an
 existing install, lets you pick the source, and offers a multi-select list of add-ons — MCP servers,
 plugins, skills, and a VS Code extension — installing each one the way its own project documents:
 
 ```bash
 ./install.sh
 ```
+
+Use `./install.sh --help` for usage or `./install.sh --no-color` for plain output. `NO_COLOR=1`
+also disables colors. All 14 add-ons start selected; enter numbers to toggle them, `a` for all,
+`n` for none, or Enter to accept.
+
+For project-local handoff skills or KTX conventions, run the script **from your target project**:
+
+```bash
+cd /path/to/your/project
+/path/to/opencode-dev-setup/install.sh
+```
+
+Provider login, API keys, and Serena's per-project configuration remain separate steps. The script
+writes global OpenCode settings to `~/.config/opencode/opencode.json`; the `OPENCODE_CONFIG` and
+`OPENCODE_CONFIG_DIR` environment variables do not change the installer's destination.
 
 See [Add-ons](#7-add-ons) for what the list contains.
 
@@ -26,7 +41,8 @@ by Git so running add-on installers here does not add generated files to this se
   [Ghostty](https://ghostty.org), [WezTerm](https://wezterm.org), [Alacritty](https://alacritty.org),
   or [Kitty](https://sw.kovidgoyal.net/kitty/).
 - **An API key** for at least one LLM provider (Anthropic, OpenAI, OpenCode Zen, etc.).
-- **Homebrew** if you plan to install that way — <https://brew.sh>.
+- **Homebrew** for the manual Homebrew commands below — <https://brew.sh>. The interactive installer
+  can install it when needed.
 
 The interactive installer installs missing dependencies for the tools you select. This can include
 Homebrew itself, Node.js/npm/npx, Git, VS Code, uv/Python, and the JVM toolchain. Homebrew may ask for
@@ -74,6 +90,11 @@ opencode --version
 ---
 
 ## 3. Connect a provider
+
+The manual CLI/config examples below primarily use OpenCode V1 conventions. The installer detects
+V1 versus V2 and writes the matching plugin and MCP keys; version differences are called out in
+those sections. Check `opencode --version`, command `--help`, and the
+[V2 documentation](https://opencode.ai/v2/docs/) when using a V2 installation.
 
 OpenCode stores credentials in `~/.local/share/opencode/auth.json`. Two ways to get them there:
 
@@ -146,8 +167,8 @@ too.
 
 ### Running inside VS Code
 
-OpenCode has no separate GUI — you run the CLI in VS Code's integrated terminal, and a companion
-extension adds editor awareness on top. The extension installs itself the first time you run
+Run the CLI in VS Code's integrated terminal; a companion extension adds editor awareness.
+The extension installs itself the first time you run
 `opencode` from the integrated terminal (not an external one). If that fails, search for *OpenCode*
 in the Extensions view, and make sure the `code` command is on your PATH via
 `Cmd+Shift+P` → *Shell Command: Install 'code' command in PATH*.
@@ -194,12 +215,14 @@ order: remote org config → global → `OPENCODE_CONFIG` → project → `.open
 
 Both `.json` and `.jsonc` (with comments) are accepted — but **pick one and stay there**. Merging
 happens per key, not per array element, so if `opencode.json` and `opencode.jsonc` both define
-`plugin`, one array shadows the other entirely and the plugins in the losing file never load.
+`plugin` (V1) or `plugins` (V2), competing arrays can leave some plugins unloaded.
 
-This bites easily, because `opencode plugin <pkg> --global` writes to `opencode.jsonc` while most
-third-party installers patch `opencode.json`. `install.sh` folds any stray `opencode.jsonc` back
-into `opencode.json` on every run, and also strips a `plugin` key from `tui.json`, where it is
-silently ignored. If you edit config by hand, keep everything in `opencode.json`.
+Before and after add-on setup, `install.sh` consolidates a stray `opencode.jsonc` into
+`opencode.json`, retaining the former as `opencode.jsonc.superseded` after a successful merge.
+It also moves `plugin` / `plugins` entries out of `tui.json` while preserving other TUI settings.
+Its JSONC reader handles full-line `//` comments; inline/block comments and trailing commas need
+manual conversion to JSON. A parse failure stops setup without deleting the source configuration.
+If you edit config by hand, keep one main config file.
 
 ### A reasonable starting global config
 
@@ -300,7 +323,7 @@ absolute with `/` or `~`).
 
 ## 6. Extending OpenCode
 
-OpenCode has five distinct extension mechanisms. They are easy to confuse, so here is what each one
+OpenCode has six distinct extension mechanisms. They are easy to confuse, so here is what each one
 actually is before the how-to:
 
 | Mechanism | What it is | Loaded |
@@ -379,15 +402,9 @@ Plugins are JS modules that hook into the OpenCode runtime — they can rewrite 
 intercept commands, register tools, and react to events. Unlike skills, a plugin is active on every
 turn.
 
-Install from npm:
-
-```bash
-opencode plugin <npm-module> --global   # writes to global config
-opencode plugin <npm-module>            # project config
-opencode plugin <npm-module> --force    # replace an existing version
-```
-
-Or declare them directly:
+Declare npm packages in `~/.config/opencode/opencode.json` for global use, or in a project's
+`opencode.json` for that project. OpenCode downloads declared packages and their dependencies when
+it starts. OpenCode V1 uses `plugin`:
 
 ```json
 {
@@ -396,10 +413,19 @@ Or declare them directly:
 }
 ```
 
-You can also load a plugin from a local file by dropping it in `~/.config/opencode/plugins/` or
-`.opencode/plugins/`, or by pointing the `plugin` array at a path. **Relative paths resolve against
-the `opencode.json` that declares them**, so a `./...` path in your global config will not resolve
-the way you expect — use an absolute path when sharing one checkout across projects.
+OpenCode V2 uses `plugins`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["@dietrichgebert/ponytail"]
+}
+```
+
+Local plugin entry points also differ: V1 can use a JS file path; V2 configured paths name a plugin
+directory. Follow the plugin's version-specific installation instructions. **Relative paths resolve
+against the config that declares them**; use an absolute path for a shared checkout. See the
+[plugin docs](https://opencode.ai/docs/plugins/) and [Ponytail's installation guide](https://github.com/DietrichGebert/ponytail/blob/main/INSTALL.md#opencode).
 
 ### MCP servers
 
@@ -415,6 +441,8 @@ opencode mcp debug <name> # diagnose connection/OAuth problems
 ```
 
 A **local** server is a process OpenCode spawns:
+
+The following local and remote examples use V1's direct `mcp.<name>` layout.
 
 ```json
 {
@@ -450,6 +478,28 @@ A **remote** server is reached over HTTP:
   }
 }
 ```
+
+For V2, nest entries under `mcp.servers` and use `disabled` instead of `enabled`. A local example:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "my-local-server": {
+        "type": "local",
+        "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+        "disabled": false,
+        "timeout": { "startup": 5000 }
+      }
+    }
+  }
+}
+```
+
+Remote entries use the same V2 nesting and enablement fields. The installer applies these
+differences automatically to Serena, Context7, and gradle-mcp. Manual examples require you to
+provide their launcher dependencies, such as Node/npm for `npx`.
 
 OAuth is auto-detected: OpenCode catches the 401, registers a client dynamically if the server
 supports it, and stores tokens in `~/.local/share/opencode/mcp-auth.json`. Set `"oauth": false` for
@@ -505,9 +555,8 @@ Reusable prompt templates, either in config or as markdown files in `~/.config/o
 }
 ```
 
-Commands are discovered from files only in the project directory or the global commands directory —
-a plugin's own command files are not picked up just because you loaded the plugin from a path. See
-the Ponytail notes below for the practical consequence.
+Standalone command files belong in the project or global commands directory. A plugin may also
+register its own commands; follow that plugin's installation instructions for your OpenCode version.
 
 ### Instructions
 
@@ -590,7 +639,7 @@ directories copied from a git clone, and one is a VS Code extension.
 
 Things worth knowing before you run it:
 
-- **Dependencies follow the selected tool.** Working installations are reused. Missing Node is
+- **Dependencies follow the selected tool.** Working installations are reused. Missing or unsuitable Node is
   installed as Node 24 LTS through Homebrew, with its path activated for this run and future zsh
   sessions. Handoff requires Node 22.20+; caveman and local mem0 use Node 22.13+ to satisfy their
   current transitive dependencies, even though their own quick-start requirements are lower.
@@ -614,11 +663,10 @@ Things worth knowing before you run it:
   plugin (V2), within 120 seconds. Crashes, missing registration, and timeouts fail the check and
   remove that plugin entry. This checks registration, not an end-to-end memory query. First use
   can download a ~547 MB embedding model; automatic capture needs a configured memory provider.
-- **DCP is installed last on purpose.** Its docs ask for it at the end of the `plugin` array so it
+- **DCP is installed last on purpose.** Its docs ask for it at the end of the plugin array so it
   does not interfere with OAuth plugins, so the script moves it there after everything else.
-- **caveman installs from git `main`**, so you always get the current plugin. Its per-turn
-  reinforcement uses `experimental.chat.system.transform` — the same hook ponytail uses — which is
-  by design; the two projects are meant to run together.
+- **caveman runs its upstream GitHub installer** through `npx`. That installer manages its plugin,
+  commands, and rules; it may pin the assets it downloads to an upstream release.
 
 MCP servers and plugins load at startup, so restart OpenCode after the script finishes.
 
@@ -678,18 +726,14 @@ handling, security, and accessibility are explicitly never cut. On the maintaine
 benchmark (12 feature tickets against a real FastAPI + React repo, Haiku 4.5, n=4) it produced ~54%
 less code, ~20% lower cost, and ~27% less wall time than the same agent with no skill.
 
-On OpenCode it ships as a plugin that appends the ruleset to the system prompt every turn via the
-`experimental.chat.system.transform` hook, registers the `/ponytail` commands, and persists the
-active intensity level.
+On OpenCode it ships as a plugin that injects the ruleset, registers the `/ponytail` commands,
+and supports the active intensity level through the host's plugin API.
 
 #### Install (recommended)
 
-```bash
-opencode plugin @dietrichgebert/ponytail --global
-```
-
-This installs the npm package and adds it to `~/.config/opencode/opencode.json`, making it active in
-every project. Equivalent manual edit:
+Select Ponytail in `install.sh`. The script registers it in the global config and asks which
+intensity to use. For a manual global install, add the package to
+`~/.config/opencode/opencode.json`. V1:
 
 ```json
 {
@@ -698,8 +742,18 @@ every project. Equivalent manual edit:
 }
 ```
 
-Drop `--global` to scope it to the current project instead. Restart OpenCode; a startup badge shows
-the current mode.
+V2:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["@dietrichgebert/ponytail"]
+}
+```
+
+Use a project's `opencode.json` for project-only scope. Restart OpenCode after changing the config.
+The [upstream guide](https://github.com/DietrichGebert/ponytail/blob/main/INSTALL.md#opencode)
+also documents V2's `opencode plugin add @dietrichgebert/ponytail` command; V1 has no `plugin add`.
 
 #### Install from a checkout
 
@@ -709,7 +763,7 @@ Useful if you want to edit the ruleset or track `main`. Clone once to a permanen
 git clone https://github.com/DietrichGebert/ponytail ~/ponytail
 ```
 
-Then point your **global** config at the plugin file by **absolute** path:
+Then point your global config at the appropriate entry point by absolute path. V1 uses the file:
 
 ```json
 {
@@ -718,32 +772,28 @@ Then point your **global** config at the plugin file by **absolute** path:
 }
 ```
 
-Two things trip people up here:
+V2 uses the directory:
 
-1. The README shows `"./.opencode/plugins/ponytail.mjs"`, which resolves relative to the project's
-   own `opencode.json`. That only works when the project you open *is* the ponytail checkout. Use
-   the absolute path for every other project — the plugin locates its own `hooks/` and `skills/`
-   relative to its file, so one checkout serves all projects.
-2. The plugin and the slash commands are separate. The plugin gives you the always-on ruleset
-   everywhere, but the `/ponytail` command files live in `.opencode/command/` and OpenCode only
-   auto-discovers those from the current project or the global commands directory. Link them once:
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/Users/YOUR_USERNAME/ponytail/.opencode/plugins"]
+}
+```
 
-   ```bash
-   mkdir -p ~/.config/opencode/command
-   ln -sf ~/ponytail/.opencode/command/* ~/.config/opencode/command/
-   ```
-
-   The npm install above does not need this step — the packaged plugin registers the commands
-   itself. Even without autocomplete, typing `/ponytail` still runs.
+Use the checkout's actual absolute path. A relative path in a global config resolves against that
+config, rather than against whichever project you open. V2 rejects a configured path to the
+individual `ponytail.mjs` file. See the upstream guide for the command-discovery behavior of your
+Ponytail/OpenCode versions.
 
 #### Commands
 
 | Command | What it does |
 | --- | --- |
-| `/ponytail [lite \| full \| ultra \| off]` | Set intensity, or turn it off. No argument reports the current level. |
-| `/ponytail-review` | Review the current diff for over-engineering, hands back a delete-list. |
+| `/ponytail [lite \| full \| ultra \| off]` | Set intensity or turn it off; no argument re-enables it if off, otherwise reports the level. |
+| `/ponytail-review` | Review a change for correctness, safety, performance, and unnecessary code. |
 | `/ponytail-audit` | Audit the whole repo, not just the diff. |
-| `/ponytail-debt` | Collect the `ponytail:` shortcuts you deferred into a ledger. |
+| `/ponytail-debt` | Collect `shortcut:` comments and older `ponytail:` comments into a ledger. |
 | `/ponytail-gain` | Show the measured-impact scoreboard from the benchmark. |
 | `/ponytail-help` | Quick reference for the above. |
 
@@ -762,6 +812,10 @@ Or in `~/.config/ponytail/config.json`:
 ```json
 { "defaultMode": "full" }
 ```
+
+The installer writes every selected mode, including `full`, while retaining other config fields.
+An exported `PONYTAIL_DEFAULT_MODE` takes precedence over the file; the installer reports that
+override rather than silently changing your environment setting.
 
 The ruleset is also injected into every subagent spawned via the task tool. To limit that, set
 `PONYTAIL_SUBAGENT_MATCHER` to a regex tested (unanchored, case-insensitive) against the subagent's
@@ -789,9 +843,11 @@ cd ~/ponytail/ponytail-mcp && npm install
 }
 ```
 
+This MCP example uses V1 nesting; use `mcp.servers.ponytail` on V2 as described above.
+
 #### Uninstall
 
-Remove the entry from the `plugin` array in your config (and the symlinked command files, if you
+Remove the entry from `plugin` (V1) or `plugins` (V2) in your config (and symlinked command files, if you
 created them). Ponytail also writes a mode flag and `~/.config/ponytail/config.json` outside the
 plugin folder; `node scripts/uninstall.js` from a checkout cleans those up.
 
@@ -841,7 +897,7 @@ and `.claude/skills`).
 
 ```bash
 opencode upgrade                 # latest
-opencode upgrade v0.1.48         # specific version
+opencode upgrade 1.18.29         # specific V1 version, as an example
 opencode upgrade -m brew         # tell it which install method you used
 ```
 
@@ -860,8 +916,21 @@ opencode uninstall               # remove binary, config, and session data
 opencode uninstall --keep-config --keep-data
 ```
 
-It does not know about add-ons, though. Running [`install.sh`](install.sh) and choosing **Uninstall**
-removes those too. It offers a config backup first, then clears:
+When `opencode` is on your `PATH`, running [`install.sh`](install.sh) offers **Uninstall and quit**.
+That opens a removal menu; each family is a separate choice, and **Done** leaves the rest in place.
+Reinstall uses the same menu and proceeds only after you remove the OpenCode core.
+
+| Removal choice | What it removes |
+| --- | --- |
+| OpenCode + add-on config | OpenCode binary/packages, global config, credentials, sessions, caches, and the related directories below |
+| JVM toolchain | All Java, JBang, and Gradle candidates under `~/.sdkman`; also Homebrew JBang/Gradle copies |
+| uv / uvx | Homebrew or default standalone launchers, default uv data/cache directories, and a legacy `# uv` PATH block |
+| Bun | An existing Homebrew/standalone Bun installation and its `# bun` shell block; this installer does not install Bun |
+| opencode-mem0 | The global npm package and the installer-owned `# opencode mem0` key block |
+| Kotlin extension | `JetBrains.kotlin-server` in the first detected editor, after confirmation |
+
+The OpenCode core choice offers a backup of `~/.config/opencode` before removal. That archive
+does **not** include credentials or sessions under `~/.local/share/opencode`. Core removal clears:
 
 | Removed outright | What it holds |
 | --- | --- |
@@ -873,17 +942,14 @@ removes those too. It offers a config backup first, then clears:
 | `~/.config/ponytail` | ponytail mode and config |
 | `~/.serena` | Serena's global config and logs |
 
-Four things it asks about individually, because removing them might not be what you want:
+Core removal also removes the `# opencode` PATH block and `# opencode superpowers` telemetry block
+from `.zshrc`. It matches the exact header and following line, and skips rewriting a profile that
+would become empty. Node/Homebrew PATH blocks stay with those shared dependencies.
 
-- **The Kotlin by JetBrains extension**, since it lives in the editor rather than under `$HOME`. The
-  script also refuses to guess which editor: if `code` is missing but `cursor` is present, it asks
-  before touching the other one.
-- **The globally installed `opencode-mem0` package**, if you chose the local memory backend.
-- **The `~/.zshrc` lines the script added** — the `PATH` entry and the Superpowers telemetry opt-out.
-  It matches the exact comment header it wrote and the single line beneath it, and refuses to write
-  the file back if the result would be empty.
-- **uv and JBang**, which Serena and gradle-mcp need. Defaults to keeping them, since other projects
-  on the machine may depend on them.
+Homebrew, Node, Git, VS Code, and SDKMAN itself remain installed. The uv-managed Serena package
+and Python environment also survive core removal; the uv removal option clears its default data
+directory, which can include other uv-managed tools. Choosing a dependency removal item affects
+that shared installation, not only its OpenCode use.
 
 Two categories are deliberately left alone. Project directories are never touched, so `.serena/`,
 `.agents/skills/`, `.opencode/`, and any KTX block appended to an `AGENTS.md` survive — the script
@@ -896,8 +962,23 @@ save its key in an installer-owned `.zshrc` block; the mem0 uninstall option rem
 ## 12. Troubleshooting
 
 **`opencode: command not found`** — the install script's target directory isn't on your `PATH`. Add
-it to `~/.zshrc` and reload. With Homebrew on Apple Silicon, make sure `/opt/homebrew/bin` is on
-`PATH`.
+it to `~/.zshrc` and reload with `source ~/.zshrc`. Dependency PATH changes made by the installer
+apply to its own process and future shells; an already-open shell also needs that reload.
+
+**A selected tool says failed or skipped** — those states are reported separately from configured
+tools. Review the dependency/install output above the summary and re-run the script. Failure returns
+a nonzero exit status; a deliberate skip does not. Configured npm plugins still load on the next
+OpenCode start.
+
+**Local mem0 fails its startup check** — the installer removes its plugin entry after a crash,
+timeout, or missing registration. Check OpenCode/plugin compatibility and local storage setup
+before retrying. The 120-second check proves registration, not a successful memory query or
+completion of the initial embedding-model download. Hosted mem0 instead requires `MEM0_API_KEY`;
+an empty key response skips it.
+
+**Configuration consolidation fails** — keep the source file and correct its syntax. The
+installer's JSONC merge accepts full-line `//` comments but not other JSONC extensions. Convert
+inline/block comments and trailing commas to plain JSON before retrying.
 
 **No models listed** — confirm a provider is authenticated with `opencode auth list`, then refresh
 the model cache with `opencode models --refresh`.
@@ -905,18 +986,15 @@ the model cache with `opencode models --refresh`.
 **See the resolved config** — `opencode debug config` prints the final merged configuration,
 including anything enforced by managed settings or MDM.
 
-**OpenCode hangs on startup and prints nothing** — a plugin is blocking during load. The log at
-`~/.local/share/opencode/log/opencode.log` stops after the `loading path=.../opencode.json` lines and
-never reaches `all LSPs are disabled`. Bisect by pointing `~/.config/opencode/opencode.json` at one
-plugin at a time and running `opencode debug config`, which completes in about a second on a healthy
-config. A plugin waiting on a backend you never configured — mem0 without `MEM0_API_KEY` is the
-usual one — waits forever rather than failing.
+**OpenCode hangs on startup** — inspect the logs and isolate plugins one at a time. Check each
+plugin's host-version compatibility, API keys, and backend configuration. For V1, `opencode debug
+config` can help diagnose configuration/plugin loading; use V2's diagnostics for a V2 installation.
 
-**`/status` lists fewer plugins than you installed** — you almost certainly have both an
-`opencode.json` and an `opencode.jsonc` in `~/.config/opencode/`, and only one of the two `plugin`
-arrays is winning. Merge them into `opencode.json`, delete the `.jsonc`, and restart. Re-running
-`install.sh` does this for you. Note that a plugin loaded from a path shows up in `/status` under
-its filename, so `./plugins/caveman/plugin.js` appears as `plugin` rather than as caveman.
+**Plugins are missing** — check `plugin` on V1 versus `plugins` on V2, supported package versions,
+and conflicting global/project config files. Re-running `install.sh` consolidates its standard
+global config files; successful merges retain `.jsonc` as `.jsonc.superseded`. Restart OpenCode
+after changes. A configured result in the installer summary does not guarantee every plugin's
+runtime initialization has succeeded.
 
 **Read the logs** — `opencode --print-logs --log-level DEBUG`.
 
@@ -931,6 +1009,7 @@ its filename, so `./plugins/caveman/plugin.js` appears as `plugin` rather than a
 ## Reference
 
 - Docs: <https://opencode.ai/docs/>
+- V2 docs: <https://opencode.ai/v2/docs/>
 - IDE integration: <https://opencode.ai/docs/ide/>
 - Config schema: <https://opencode.ai/config.json>
 - TUI schema: <https://opencode.ai/tui.json>
